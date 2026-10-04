@@ -1,0 +1,361 @@
+Subject: [PATCH] Preserve Shift when forwarding Kitty keys through mux
+
+Apply after https://github.com/wezterm/wezterm/pull/7542
+PR head: 2b76b4904ee80f323c940933c8a9a7ca6e3379b5
+Tested upstream: cab25161054c50fd6c705db4ceefef0f1e5a9575
+
+Restore the Shift bit from the GUI raw event before forwarding the cooked
+key and modifiers to a pane. Retain composed Alt/Ctrl state and normalized
+key binding lookup. In termwiz, defer legacy Shift removal until after
+Kitty encoding so Alt+Shift+a remains CSI 97;4u rather than CSI 97;3u.
+
+Include regressions for normalized GUI events, combined modifiers,
+punctuation, positional modifiers, alternate keys, encoder key releases,
+and legacy Xterm/CSI-u behavior. This does not add mux key-up transport.
+
+---
+diff --git a/termwiz/src/input.rs b/termwiz/src/input.rs
+index 1e99f7cee9ac9a66845742ac139ee19570a413de..fb5ab96dfd97295337e3a99c1f945363a108b93e 100644
+--- a/termwiz/src/input.rs
++++ b/termwiz/src/input.rs
+@@ -353,17 +353,6 @@ impl KeyCode {
+         use KeyCode::*;
+ 
+         let key = self.normalize_shift_to_upper_case(mods);
+-        // Normalize the modifier state for Char's that are uppercase; remove
+-        // the SHIFT modifier so that reduce ambiguity below
+-        let mods = match key {
+-            Char(c)
+-                if (c.is_ascii_punctuation() || c.is_ascii_uppercase())
+-                    && mods.contains(Modifiers::SHIFT) =>
+-            {
+-                mods & !Modifiers::SHIFT
+-            }
+-            _ => mods,
+-        };
+ 
+         // Normalize Backspace and Delete
+         let key = match key {
+@@ -396,6 +385,19 @@ impl KeyCode {
+             return Ok(String::new());
+         }
+ 
++        // Legacy encodings fold Shift into the generated character. Kitty
++        // needs both the shifted character and the original Shift modifier,
++        // so only normalize the modifiers after the Kitty branch above.
++        let mods = match key {
++            Char(c)
++                if (c.is_ascii_punctuation() || c.is_ascii_uppercase())
++                    && mods.contains(Modifiers::SHIFT) =>
++            {
++                mods & !Modifiers::SHIFT
++            }
++            _ => mods,
++        };
++
+         let mut buf = String::new();
+ 
+         // TODO: also respect self.application_keypad
+@@ -1600,6 +1602,181 @@ mod test {
+     const NO_MORE: bool = false;
+     const MAYBE_MORE: bool = true;
+ 
++    #[test]
++    fn encode_kitty_forwarded_normalized_key() {
++        use wezterm_input_types::{
++            Handled, KeyCode as InputKeyCode, KeyEvent as InputKeyEvent, KittyKeyboardFlags,
++            RawKeyEvent,
++        };
++
++        let flags = KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES;
++        let mode = KeyCodeEncodeModes {
++            encoding: KeyboardEncoding::Kitty(flags),
++            newline_mode: false,
++            application_cursor_keys: false,
++            modify_other_keys: None,
++        };
++        for (modifiers, expected) in [
++            (Modifiers::ALT | Modifiers::SHIFT, "\x1b[97;4u"),
++            (Modifiers::CTRL | Modifiers::SHIFT, "\x1b[97;6u"),
++            (
++                Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[97;8u",
++            ),
++        ] {
++            let event = InputKeyEvent {
++                key: InputKeyCode::Char('a'),
++                modifiers,
++                leds: InputKeyboardLedStatus::empty(),
++                repeat_count: 1,
++                key_is_down: true,
++                raw: Some(RawKeyEvent {
++                    key: InputKeyCode::Char('a'),
++                    modifiers,
++                    leds: InputKeyboardLedStatus::empty(),
++                    phys_code: None,
++                    raw_code: 0,
++                    #[cfg(windows)]
++                    scan_code: 0,
++                    repeat_count: 1,
++                    key_is_down: true,
++                    handled: Handled::new(),
++                }),
++                #[cfg(windows)]
++                win32_uni_char: None,
++            }
++            .normalize_shift();
++
++            // Local GUI encoding has access to raw modifiers.
++            assert_eq!(event.encode_kitty(flags), expected);
++            assert_eq!(event.key, InputKeyCode::Char('A'));
++            assert!(!event.modifiers.contains(Modifiers::SHIFT));
++
++            // SendKeyDown carries only the normalized key and modifiers.
++            let forwarded = KeyEvent {
++                key: KeyCode::Char('A'),
++                modifiers: event.modifiers_with_raw_shift(),
++            };
++            assert_eq!(
++                forwarded
++                    .key
++                    .encode(forwarded.modifiers, mode, true)
++                    .unwrap(),
++                expected
++            );
++        }
++    }
++
++    #[test]
++    fn encode_kitty_shift_modifiers() {
++        use wezterm_input_types::KittyKeyboardFlags as Flags;
++
++        let mode = KeyCodeEncodeModes {
++            encoding: KeyboardEncoding::Kitty(Flags::DISAMBIGUATE_ESCAPE_CODES),
++            newline_mode: false,
++            application_cursor_keys: false,
++            modify_other_keys: None,
++        };
++        let cases = [
++            (KeyCode::Char('a'), Modifiers::ALT, "\x1b[97;3u"),
++            // Uppercase alone (e.g. Caps Lock) must not imply Shift.
++            (KeyCode::Char('A'), Modifiers::ALT, "\x1b[97;3u"),
++            (
++                KeyCode::Char('a'),
++                Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[97;4u",
++            ),
++            (
++                KeyCode::Char('A'),
++                Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[97;4u",
++            ),
++            (
++                KeyCode::Char('a'),
++                Modifiers::CTRL | Modifiers::SHIFT,
++                "\x1b[97;6u",
++            ),
++            (
++                KeyCode::Char('a'),
++                Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[97;8u",
++            ),
++            (
++                KeyCode::Char('!'),
++                Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[49;4u",
++            ),
++            (
++                KeyCode::Char('{'),
++                Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[91;4u",
++            ),
++            (
++                KeyCode::LeftArrow,
++                Modifiers::ALT | Modifiers::SHIFT,
++                "\x1b[1;4D",
++            ),
++            (KeyCode::Tab, Modifiers::ALT | Modifiers::SHIFT, "\x1b[9;4u"),
++            (
++                KeyCode::Char('A'),
++                Modifiers::ALT | Modifiers::LEFT_ALT | Modifiers::SHIFT | Modifiers::LEFT_SHIFT,
++                "\x1b[97;4u",
++            ),
++        ];
++        for (key, modifiers, expected) in cases {
++            assert_eq!(
++                key.encode(modifiers, mode, true).unwrap(),
++                expected,
++                "{key:?} {modifiers:?}"
++            );
++            assert_eq!(key.encode(modifiers, mode, false).unwrap(), "");
++        }
++
++        let mode = KeyCodeEncodeModes {
++            encoding: KeyboardEncoding::Kitty(
++                Flags::DISAMBIGUATE_ESCAPE_CODES
++                    | Flags::REPORT_EVENT_TYPES
++                    | Flags::REPORT_ALTERNATE_KEYS,
++            ),
++            ..mode
++        };
++        let mods = Modifiers::ALT | Modifiers::SHIFT;
++        assert_eq!(
++            KeyCode::Char('a').encode(mods, mode, true).unwrap(),
++            "\x1b[97:65;4u"
++        );
++        assert_eq!(
++            KeyCode::Char('a').encode(mods, mode, false).unwrap(),
++            "\x1b[97:65;4:3u"
++        );
++    }
++
++    #[test]
++    fn encode_legacy_shift_modifiers() {
++        for encoding in [KeyboardEncoding::Xterm, KeyboardEncoding::CsiU] {
++            let mode = KeyCodeEncodeModes {
++                encoding,
++                newline_mode: false,
++                application_cursor_keys: false,
++                modify_other_keys: None,
++            };
++            for (key, expected) in [
++                (KeyCode::Char('a'), "\x1bA"),
++                (KeyCode::Char('A'), "\x1bA"),
++                (KeyCode::Char('!'), "\x1b!"),
++                (KeyCode::LeftArrow, "\x1b[1;4D"),
++            ] {
++                let mods = Modifiers::ALT | Modifiers::SHIFT;
++                assert_eq!(
++                    key.encode(mods, mode, true).unwrap(),
++                    expected,
++                    "{encoding:?} {key:?}"
++                );
++                assert_eq!(key.encode(mods, mode, false).unwrap(), "");
++            }
++        }
++    }
++
+     #[test]
+     fn simple() {
+         let mut p = InputParser::new();
+diff --git a/wezterm-gui/src/termwindow/keyevent.rs b/wezterm-gui/src/termwindow/keyevent.rs
+index d66908074090d5a2b541a5a5065c3311a78906f5..879bf94fd1e652c9abf39bd8741938c99fa295eb 100644
+--- a/wezterm-gui/src/termwindow/keyevent.rs
++++ b/wezterm-gui/src/termwindow/keyevent.rs
+@@ -358,7 +358,9 @@ impl super::TermWindow {
+ 
+             if bypass_compose {
+                 if let Key::Code(term_key) = self.win_key_code_to_termwiz_key_code(keycode) {
+-                    let tw_raw_modifiers = raw_modifiers;
++                    let tw_raw_modifiers = key_event
++                        .map(KeyEvent::modifiers_with_raw_shift)
++                        .unwrap_or(raw_modifiers);
+ 
+                     let mut did_encode = false;
+                     if let Some(key_event) = key_event {
+@@ -686,6 +688,10 @@ impl super::TermWindow {
+                         .write_all(encoded.as_bytes())
+                         .context("sending kitty encoded data")
+                 } else {
++                    // A mux pane receives only the key and modifiers, so
++                    // preserve Shift before discarding the raw event. The
++                    // server applies any encoding-specific normalization.
++                    let modifiers = window_key.modifiers_with_raw_shift();
+                     if self.config.debug_key_events {
+                         log::info!(
+                             "send to pane {} key={:?} mods={:?}",
+diff --git a/wezterm-input-types/src/lib.rs b/wezterm-input-types/src/lib.rs
+index f5673f600d8a06b4239a9a3c1146fc387123d8a8..ece022e55f6973807c18b06a5038a9311bb0e98a 100644
+--- a/wezterm-input-types/src/lib.rs
++++ b/wezterm-input-types/src/lib.rs
+@@ -1549,6 +1549,18 @@ impl KeyEvent {
+         self
+     }
+ 
++    /// Restore Shift consumed by `normalize_shift` before forwarding a key
++    /// without its raw event (e.g. to a mux pane). Keep the composed state of
++    /// the other modifiers: composition may intentionally consume Alt/Ctrl.
++    pub fn modifiers_with_raw_shift(&self) -> Modifiers {
++        self.modifiers
++            | self
++                .raw
++                .as_ref()
++                .map(|raw| raw.modifiers & Modifiers::SHIFT)
++                .unwrap_or(Modifiers::NONE)
++    }
++
+     /// If the key code is a modifier key (Control, Alt, Shift), check
+     /// the underlying raw event to see if we had a positional version
+     /// of that key.
+@@ -2307,6 +2319,71 @@ impl Default for UIKeyCapRendering {
+ mod test {
+     use super::*;
+ 
++    #[test]
++    fn forwarding_restores_shift_after_normalization() {
++        for modifiers in [
++            Modifiers::SHIFT,
++            Modifiers::ALT | Modifiers::SHIFT,
++            Modifiers::CTRL | Modifiers::SHIFT,
++            Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT,
++        ] {
++            let event = make_event_with_raw(
++                KeyEvent {
++                    key: KeyCode::Char('a'),
++                    modifiers,
++                    leds: KeyboardLedStatus::empty(),
++                    repeat_count: 1,
++                    key_is_down: true,
++                    raw: None,
++                    #[cfg(windows)]
++                    win32_uni_char: None,
++                },
++                None,
++            )
++            .normalize_shift();
++
++            assert_eq!(event.key, KeyCode::Char('A'));
++            assert_eq!(event.modifiers_with_raw_shift(), modifiers);
++            // Key binding lookup must still use the normalized modifiers.
++            assert_eq!(event.modifiers, modifiers - Modifiers::SHIFT);
++        }
++    }
++
++    #[test]
++    fn forwarding_preserves_composed_modifiers() {
++        let mut event = make_event_with_raw(
++            KeyEvent {
++                key: KeyCode::Char('A'),
++                modifiers: Modifiers::ALT,
++                leds: KeyboardLedStatus::CAPS_LOCK,
++                repeat_count: 1,
++                key_is_down: true,
++                raw: None,
++                #[cfg(windows)]
++                win32_uni_char: None,
++            },
++            None,
++        );
++        // An uppercase character does not by itself imply Shift.
++        assert_eq!(event.modifiers_with_raw_shift(), Modifiers::ALT);
++
++        // Do not restore Alt/Ctrl consumed by keyboard layout composition.
++        event.modifiers = Modifiers::SUPER;
++        event.raw.as_mut().unwrap().modifiers = Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT;
++        assert_eq!(
++            event.modifiers_with_raw_shift(),
++            Modifiers::SUPER | Modifiers::SHIFT
++        );
++
++        event.raw = None;
++        assert_eq!(event.modifiers_with_raw_shift(), Modifiers::SUPER);
++        event.modifiers |= Modifiers::SHIFT;
++        assert_eq!(
++            event.modifiers_with_raw_shift(),
++            Modifiers::SUPER | Modifiers::SHIFT
++        );
++    }
++
+     #[test]
+     fn encode_issue_3220() {
+         let flags =

@@ -52,6 +52,8 @@ env:
 ### 方式 2：放入 `patches/` 目录（可选本地补丁）
 将你自己的 `*.patch` 或 `*.diff` 文件直接放入 `patches/` 目录（例如 `patches/my-fix.patch`）并提交到仓库，CI 构建时会自动检测并应用。
 
+CI 先按配置顺序应用远程补丁，再应用本地补丁。本仓库的 [Kitty Shift 修复](patches/README.md) 依赖 PR #7542，用于保留 mux 会话中的 `Alt+Shift`、`Ctrl+Shift` 等组合键。
+
 ---
 
 ## 触发方式
