@@ -9,9 +9,9 @@ on:
         default: 'main'
         type: string
       patches:
-        description: 'Patches to apply (URLs, PR links, or commit links, newline-separated)'
+        description: 'Patch URLs / PR links (leave empty to use PATCH_URLS configured in workflow)'
         required: false
-        default: 'https://github.com/wezterm/wezterm/pull/7542/changes'
+        default: ''
         type: string
       tag_name:
         description: 'Release tag name (default: <wezterm_version>-YYYYMMDD-HHMMSS)'
@@ -43,11 +43,18 @@ on:
       - main
     paths:
       - '.github/workflows/**'
-      - 'patches/**'
 
 env:
-  # 默认打上的补丁列表（每行一个，支持 GitHub PR/commit 链接、.patch URL 或本地 patches/ 目录）
-  DEFAULT_PATCHES: |
+  # =========================================================================
+  # 在这里配置你需要打上的 PR 或补丁链接列表（支持 PR 页面、commit 或 patch URL）
+  # 每次仅需修改此处的链接列表即可，CI 会在构建时自动拉取 PR 的 patch 并打上
+  # 支持格式：
+  #   https://github.com/wezterm/wezterm/pull/7542/changes
+  #   https://github.com/wezterm/wezterm/pull/7542
+  #   https://github.com/wezterm/wezterm/commit/<commit-hash>
+  #   https://example.com/custom.patch
+  # =========================================================================
+  PATCH_URLS: |
     https://github.com/wezterm/wezterm/pull/7542/changes
 
 jobs:
@@ -108,7 +115,7 @@ jobs:
         run: |
           INPUT_PATCHES="${{ github.event.inputs.patches }}"
           if [ -z "$INPUT_PATCHES" ]; then
-            INPUT_PATCHES="${{ env.DEFAULT_PATCHES }}"
+            INPUT_PATCHES="${{ env.PATCH_URLS }}"
           fi
           echo "patches<<EOF" >> $GITHUB_OUTPUT
           echo "$INPUT_PATCHES" >> $GITHUB_OUTPUT
@@ -142,11 +149,6 @@ jobs:
           fetch-depth: 0
           autocrlf: false
 
-      - name: Checkout Builder Repository
-        uses: actions/checkout@v4
-        with:
-          path: _builder
-
       - name: Setup Tools (Strawberry Perl)
         shell: pwsh
         run: |
@@ -163,7 +165,7 @@ jobs:
           echo "${{ needs.prepare.outputs.tag_name }}" > wezterm-gui/.tag
           echo "Configured WezTerm build version tag: ${{ needs.prepare.outputs.tag_name }}"
 
-      - name: Apply Patches
+      - name: Fetch and Apply Patches
         shell: bash
         env:
           PATCHES: ${{ needs.prepare.outputs.patches }}
@@ -180,23 +182,13 @@ jobs:
               echo "Applying $file..."
               git apply --verbose --ignore-whitespace "$file"
             elif git apply --reverse --check --ignore-whitespace "$file" 2>/dev/null; then
-              echo "Patch $file is already applied or included upstream, skipping."
+              echo "Patch $file is already applied or merged upstream, skipping."
             else
               echo "Standard check failed, attempting 3-way merge apply..."
               git apply --verbose --ignore-whitespace -3 "$file"
             fi
           }
 
-          # 1. Apply local patch files from _builder/patches (if present)
-          if [ -d "_builder/patches" ]; then
-            for p in _builder/patches/*.patch _builder/patches/*.diff; do
-              [ -f "$p" ] || continue
-              echo "Found local repository patch: $p"
-              apply_patch_file "$p"
-            done
-          fi
-
-          # 2. Apply remote patches / PRs from inputs
           mkdir -p _downloaded_patches
           idx=0
           while IFS= read -r line || [ -n "$line" ]; do
@@ -207,7 +199,7 @@ jobs:
             idx=$((idx + 1))
             target_url="$raw"
 
-            # Normalize GitHub PR URL (/pull/7542/changes, /files -> /pull/7542.patch)
+            # 自动将 PR 页面链接 (/pull/7542/changes, /files, /pull/7542) 转换为 .patch 补丁地址
             if [[ "$target_url" =~ https?://github\.com/[^/]+/[^/]+/pull/[0-9]+ ]]; then
               base_pr=$(echo "$target_url" | grep -oE 'https?://github\.com/[^/]+/[^/]+/pull/[0-9]+')
               target_url="${base_pr}.patch"
@@ -221,9 +213,9 @@ jobs:
             apply_patch_file "$patch_path"
           done <<< "$PATCHES"
 
-          echo "===> Patching completed. Working tree status:"
+          echo "===> All patches applied. Working tree status:"
           git status --short
-          git commit -am "Apply custom patches" --allow-empty
+          git commit -am "Apply custom patches from PRs" --allow-empty
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
