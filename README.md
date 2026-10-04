@@ -9,6 +9,7 @@
 - **从 PR 链接自动拉取补丁（推荐）**：只需在工作流中配置 PR 页面链接（如 `https://github.com/wezterm/wezterm/pull/7542/changes`），CI 构建时自动转换为 `.patch` 下载并应用，无需手动下载维护文件。
 - **支持可选的本地 Patch 文件**：如有本地私有补丁或未推送到 GitHub 的修改，可直接将 `*.patch` / `*.diff` 放入 `patches/` 目录，CI 会自动一并应用。
 - **仅输出便携版（Portable Zip）**：纯绿色解压即用，包含完整的二进制与运行库（`wezterm.exe`、`wezterm-gui.exe`、`wezterm-mux-server.exe` 及 ANGLE、ConPTY、Mesa 等），无 Inno Setup 安装包多余开销。
+- **纯净小巧（默认剔除 PDB）**：默认不打包体积庞大的 `.pdb` 调试符号文件，安装包极其干净精简（体积缩减 60%+）。
 - **默认构建 upstream `main` 分支**：确保获取上游最新特性与修复。
 - **自动每月运行**：通过 Cron（每月 1 号 `0 0 1 * *`）自动定时触发编译与发布。
 - **防冲突安全机制**：内置 `git apply --reverse --check` 智能跳过已被上游合并或已打上的补丁，支持 3-way merge 自动处理代码偏移。
@@ -60,3 +61,4 @@ env:
 3. **网页手动触发 (workflow_dispatch)**：在 GitHub 仓库 **Actions** -> **Build WezTerm Windows (Patched)** -> **Run workflow**：
    - `wezterm_version`：默认 `main`，也可输入具体分支、Tag 或 Commit SHA。
    - `patches`：留空则使用 `PATCH_URLS` 中配置的列表；也可临时输入其他链接进行单次测试。
+   - `include_pdb`：是否打包 `.pdb` 调试符号文件（默认 `false`，默认保持纯净精简）。

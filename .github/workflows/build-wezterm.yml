@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      include_pdb:
+        description: 'Include .pdb debug symbols in zip package (default false)'
+        required: false
+        default: false
+        type: boolean
       run_tests:
         description: 'Run cargo test before packaging'
         required: false
@@ -305,8 +310,10 @@ jobs:
           # Copy license for compliance
           [ -f LICENSE.md ] && cp LICENSE.md "$zipdir/" || true
 
-          # Copy debug pdb if present
-          [ -f target/release/wezterm.pdb ] && cp target/release/wezterm.pdb "$zipdir/" || true
+          # Optional: copy debug pdb only if explicitly requested
+          if [ "${{ github.event.inputs.include_pdb }}" = "true" ]; then
+            [ -f target/release/wezterm.pdb ] && cp target/release/wezterm.pdb "$zipdir/" || true
+          fi
 
           # Copy runtime DLLs and helper binaries
           cp assets/windows/conhost/conpty.dll \
