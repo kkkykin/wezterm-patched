@@ -43,6 +43,7 @@ on:
       - main
     paths:
       - '.github/workflows/**'
+      - 'patches/**'
 
 env:
   # =========================================================================
@@ -149,6 +150,11 @@ jobs:
           fetch-depth: 0
           autocrlf: false
 
+      - name: Checkout Repository (for optional local patches)
+        uses: actions/checkout@v4
+        with:
+          path: _builder
+
       - name: Setup Tools (Strawberry Perl)
         shell: pwsh
         run: |
@@ -189,6 +195,16 @@ jobs:
             fi
           }
 
+          # 1. 可选的本地 patch：检查仓库 patches/ 目录是否存在本地 patch 文件
+          if [ -d "_builder/patches" ]; then
+            for p in _builder/patches/*.patch _builder/patches/*.diff; do
+              [ -f "$p" ] || continue
+              echo "Found optional local patch: $p"
+              apply_patch_file "$p"
+            done
+          fi
+
+          # 2. 从 PR 链接/URL 自动获取并应用补丁
           mkdir -p _downloaded_patches
           idx=0
           while IFS= read -r line || [ -n "$line" ]; do
@@ -215,7 +231,7 @@ jobs:
 
           echo "===> All patches applied. Working tree status:"
           git status --short
-          git commit -am "Apply custom patches from PRs" --allow-empty
+          git commit -am "Apply custom patches" --allow-empty
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
