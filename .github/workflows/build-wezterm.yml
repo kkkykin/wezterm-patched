@@ -247,14 +247,18 @@ jobs:
         with:
           path: |
             vendor
-            .cargo/config
+            .cargo/config.toml
           key: cargo-deps-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Vendor dependencies
         if: steps.cache-cargo-vendor.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          cargo vendor --locked --versioned-dirs >> .cargo/config 2>/dev/null || cargo vendor --versioned-dirs >> .cargo/config
+          cargo vendor --locked --versioned-dirs >> .cargo/config.toml 2>/dev/null || cargo vendor --versioned-dirs >> .cargo/config.toml
+
+      - name: Zero sccache statistics
+        shell: bash
+        run: sccache --zero-stats || true
 
       - name: Build wezterm (Release mode)
         shell: cmd
@@ -271,6 +275,10 @@ jobs:
       - name: Build strip-ansi-escapes (Release mode)
         shell: cmd
         run: cargo build -p strip-ansi-escapes --release
+
+      - name: Show sccache statistics
+        shell: bash
+        run: sccache --show-stats || true
 
       - name: Run Tests (Optional)
         if: ${{ github.event.inputs.run_tests == 'true' }}
