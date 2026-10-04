@@ -1,0 +1,385 @@
+name: Build WezTerm Windows (Patched)
+
+on:
+  workflow_dispatch:
+    inputs:
+      wezterm_version:
+        description: 'WezTerm git ref (branch, tag, or commit SHA)'
+        required: false
+        default: 'main'
+        type: string
+      patches:
+        description: 'Patches to apply (URLs, PR links, or commit links, newline-separated)'
+        required: false
+        default: 'https://github.com/wezterm/wezterm/pull/7542/changes'
+        type: string
+      tag_name:
+        description: 'Release tag name (default: <wezterm_version>-YYYYMMDD-HHMMSS)'
+        required: false
+        default: ''
+        type: string
+      release_name:
+        description: 'Release title'
+        required: false
+        default: 'Custom WezTerm Windows Build'
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
+        type: boolean
+      run_tests:
+        description: 'Run cargo test before packaging'
+        required: false
+        default: false
+        type: boolean
+
+  schedule:
+    - cron: '0 0 * * 0'
+
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'patches/**'
+
+env:
+  # 默认打上的补丁列表（每行一个，支持 GitHub PR/commit 链接、.patch URL 或本地 patches/ 目录）
+  DEFAULT_PATCHES: |
+    https://github.com/wezterm/wezterm/pull/7542/changes
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      wezterm_version: ${{ steps.set_version.outputs.wezterm_version }}
+      tag_name: ${{ steps.set_tag.outputs.tag_name }}
+      release_name: ${{ steps.set_release_name.outputs.release_name }}
+      patches: ${{ steps.set_patches.outputs.patches }}
+      prerelease: ${{ steps.set_prerelease.outputs.prerelease }}
+    steps:
+      - name: Set WezTerm version
+        id: set_version
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.wezterm_version }}"
+          if [ -z "$INPUT_VERSION" ] || [ "$INPUT_VERSION" = "latest" ]; then
+            LATEST_TAG=$(curl -fsSL https://api.github.com/repos/wezterm/wezterm/releases/latest | jq -r .tag_name 2>/dev/null || echo "")
+            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+              echo "wezterm_version=${LATEST_TAG}" >> $GITHUB_OUTPUT
+            else
+              echo "wezterm_version=main" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "wezterm_version=${INPUT_VERSION}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set tag name
+        id: set_tag
+        run: |
+          INPUT_TAG="${{ github.event.inputs.tag_name }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          else
+            TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+            VER="${{ steps.set_version.outputs.wezterm_version }}"
+            TAG_NAME="${VER}-${TIMESTAMP}"
+          fi
+          # Sanitize tag name
+          TAG_NAME=$(echo "$TAG_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Set release name
+        id: set_release_name
+        run: |
+          INPUT_NAME="${{ github.event.inputs.release_name }}"
+          if [ -n "$INPUT_NAME" ]; then
+            echo "release_name=${INPUT_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "release_name=Custom WezTerm Windows Build" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set patches
+        id: set_patches
+        run: |
+          INPUT_PATCHES="${{ github.event.inputs.patches }}"
+          if [ -z "$INPUT_PATCHES" ]; then
+            INPUT_PATCHES="${{ env.DEFAULT_PATCHES }}"
+          fi
+          echo "patches<<EOF" >> $GITHUB_OUTPUT
+          echo "$INPUT_PATCHES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Set prerelease
+        id: set_prerelease
+        run: |
+          echo "prerelease=${{ github.event.inputs.prerelease || 'false' }}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    runs-on: windows-2025
+    permissions:
+      contents: read
+      actions: write
+    env:
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      RUSTUP_WINDOWS_PATH_ADD_BIN: "1"
+      TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+
+    steps:
+      - name: Checkout WezTerm
+        uses: actions/checkout@v4
+        with:
+          repository: 'wezterm/wezterm'
+          ref: ${{ needs.prepare.outputs.wezterm_version }}
+          submodules: 'recursive'
+          fetch-depth: 0
+          autocrlf: false
+
+      - name: Checkout Builder Repository
+        uses: actions/checkout@v4
+        with:
+          path: _builder
+
+      - name: Setup Tools (Inno Setup & Strawberry Perl)
+        shell: pwsh
+        run: |
+          # Add Strawberry Perl to PATH if available
+          if (Test-Path "C:\Strawberry\perl\bin") {
+            Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
+            Write-Host "Added Strawberry Perl to PATH"
+          }
+
+          # Ensure Inno Setup is present in PATH
+          $innoDefault = "C:\Program Files (x86)\Inno Setup 6"
+          if (Test-Path "$innoDefault\iscc.exe") {
+            Add-Content $env:GITHUB_PATH $innoDefault
+            Write-Host "Inno Setup found at $innoDefault"
+          } elseif (Get-Command iscc.exe -ErrorAction SilentlyContinue) {
+            Write-Host "iscc.exe already present in PATH"
+          } else {
+            Write-Host "Installing Inno Setup via choco..."
+            choco install innosetup -y
+            Add-Content $env:GITHUB_PATH $innoDefault
+          }
+
+      - name: Set WezTerm Version Tag
+        shell: bash
+        run: |
+          echo "${{ needs.prepare.outputs.tag_name }}" > .tag
+          mkdir -p wezterm-gui
+          echo "${{ needs.prepare.outputs.tag_name }}" > wezterm-gui/.tag
+          echo "Configured WezTerm build version tag: ${{ needs.prepare.outputs.tag_name }}"
+
+      - name: Apply Patches
+        shell: bash
+        env:
+          PATCHES: ${{ needs.prepare.outputs.patches }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          apply_patch_file() {
+            local file="$1"
+            echo "--> Processing patch: $file"
+            if git apply --check --ignore-whitespace "$file" 2>/dev/null; then
+              echo "Applying $file..."
+              git apply --verbose --ignore-whitespace "$file"
+            elif git apply --reverse --check --ignore-whitespace "$file" 2>/dev/null; then
+              echo "Patch $file is already applied or included upstream, skipping."
+            else
+              echo "Standard check failed, attempting 3-way merge apply..."
+              git apply --verbose --ignore-whitespace -3 "$file"
+            fi
+          }
+
+          # 1. Apply local patch files from _builder/patches (if present)
+          if [ -d "_builder/patches" ]; then
+            for p in _builder/patches/*.patch _builder/patches/*.diff; do
+              [ -f "$p" ] || continue
+              echo "Found local repository patch: $p"
+              apply_patch_file "$p"
+            done
+          fi
+
+          # 2. Apply remote patches / PRs from inputs
+          mkdir -p _downloaded_patches
+          idx=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            raw=$(echo "$line" | xargs)
+            [ -z "$raw" ] && continue
+            [[ "$raw" == \#* ]] && continue
+
+            idx=$((idx + 1))
+            target_url="$raw"
+
+            # Normalize GitHub PR URL (/pull/7542/changes, /files -> /pull/7542.patch)
+            if [[ "$target_url" =~ https?://github\.com/[^/]+/[^/]+/pull/[0-9]+ ]]; then
+              base_pr=$(echo "$target_url" | grep -oE 'https?://github\.com/[^/]+/[^/]+/pull/[0-9]+')
+              target_url="${base_pr}.patch"
+            elif [[ "$target_url" =~ https?://github\.com/[^/]+/[^/]+/commit/[0-9a-fA-F]+ ]] && [[ ! "$target_url" =~ \.patch$ ]]; then
+              target_url="${target_url}.patch"
+            fi
+
+            patch_path="_downloaded_patches/patch_${idx}.patch"
+            echo "Fetching patch #$idx from: $target_url"
+            curl -fsSL "$target_url" -o "$patch_path"
+            apply_patch_file "$patch_path"
+          done <<< "$PATCHES"
+
+          echo "===> Patching completed. Working tree status:"
+          git status --short
+          git commit -am "Apply custom patches" --allow-empty
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Compile with sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust Dependencies
+        uses: actions/cache@v4
+        id: cache-cargo-vendor
+        with:
+          path: |
+            vendor
+            .cargo/config
+          key: cargo-deps-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Vendor dependencies
+        if: steps.cache-cargo-vendor.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cargo vendor --locked --versioned-dirs >> .cargo/config 2>/dev/null || cargo vendor --versioned-dirs >> .cargo/config
+
+      - name: Build wezterm (Release mode)
+        shell: cmd
+        run: cargo build -p wezterm --release
+
+      - name: Build wezterm-gui (Release mode)
+        shell: cmd
+        run: cargo build -p wezterm-gui --release
+
+      - name: Build wezterm-mux-server (Release mode)
+        shell: cmd
+        run: cargo build -p wezterm-mux-server --release
+
+      - name: Build strip-ansi-escapes (Release mode)
+        shell: cmd
+        run: cargo build -p strip-ansi-escapes --release
+
+      - name: Run Tests (Optional)
+        if: ${{ github.event.inputs.run_tests == 'true' }}
+        shell: cmd
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Package WezTerm
+        shell: bash
+        run: |
+          [ -f target/release/wezterm.pdb ] || touch target/release/wezterm.pdb
+          bash ci/deploy.sh
+
+      - name: Generate SHA256 Checksums
+        shell: bash
+        run: |
+          for f in WezTerm-*.zip WezTerm-*.exe; do
+            if [ -f "$f" ]; then
+              echo "Hashing $f..."
+              sha256sum "$f" > "$f.sha256"
+            fi
+          done
+          ls -lh WezTerm-*
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wezterm-windows
+          path: |
+            WezTerm-*.zip
+            WezTerm-*.exe
+            WezTerm-*.sha256
+          retention-days: 7
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wezterm-windows
+          path: release-assets
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+          WEZTERM_VERSION: ${{ needs.prepare.outputs.wezterm_version }}
+          PATCH_LIST: ${{ needs.prepare.outputs.patches }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          cat << 'EOF' > release_notes.md
+          ## WezTerm Windows Build (Patched)
+
+          Automated build of [WezTerm](https://github.com/wezterm/wezterm) for Windows with custom patches applied.
+
+          ### Build Information
+          - **WezTerm Upstream Ref**: `${{ env.WEZTERM_VERSION }}`
+          - **Release Tag**: `${{ env.TAG_NAME }}`
+          - **Target Platform**: Windows x86_64 (`x86_64-pc-windows-msvc`)
+
+          ### Applied Patches
+          EOF
+
+          if [ -n "$PATCH_LIST" ]; then
+            while IFS= read -r patch; do
+              p=$(echo "$patch" | xargs)
+              [ -z "$p" ] && continue
+              echo "- $p" >> release_notes.md
+            done <<< "$PATCH_LIST"
+          else
+            echo "- None (standard upstream build)" >> release_notes.md
+          fi
+
+          cat << 'EOF' >> release_notes.md
+
+          ### Checksums (SHA256)
+          ```
+          EOF
+
+          cd release-assets
+          for f in *.sha256; do
+            if [ -f "$f" ]; then
+              cat "$f" >> ../release_notes.md
+            fi
+          done
+          cd ..
+
+          cat << 'EOF' >> release_notes.md
+          ```
+
+          ### Included Files
+          - **Portable Zip** (`WezTerm-windows-*.zip`): Portable archive containing `wezterm.exe`, `wezterm-gui.exe`, `wezterm-mux-server.exe`, and required runtime DLLs (ANGLE, ConPTY, Mesa).
+          - **Setup Installer** (`WezTerm-*-setup.exe`): Windows Inno Setup installer package.
+          EOF
+
+          EXTRA_ARGS=()
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            EXTRA_ARGS+=("--prerelease")
+          fi
+
+          gh release create "$TAG_NAME" \
+            release-assets/* \
+            --title "$RELEASE_NAME ($TAG_NAME)" \
+            --notes-file release_notes.md \
+            --clobber \
+            "${EXTRA_ARGS[@]}"

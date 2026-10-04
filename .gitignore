@@ -1,0 +1,12 @@
+# Build artifacts & downloaded files
+target/
+*.zip
+*.exe
+*.sha256
+_builder/
+_downloaded_patches/
+*.patch.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
