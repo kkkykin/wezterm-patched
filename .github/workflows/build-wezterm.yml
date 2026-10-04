@@ -349,6 +349,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -357,6 +360,7 @@ jobs:
 
       - name: Create GitHub Release
         env:
+          GH_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
           RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
@@ -422,6 +426,7 @@ jobs:
             echo "Creating new release $TAG_NAME..."
             gh release create "$TAG_NAME" \
               release-assets/* \
+              --target "${{ github.sha }}" \
               --title "$RELEASE_NAME ($TAG_NAME)" \
               --notes-file release_notes.md \
               "${EXTRA_ARGS[@]}"
