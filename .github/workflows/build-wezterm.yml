@@ -294,6 +294,9 @@ jobs:
              target/release/strip-ansi-escapes.exe \
              "$zipdir/"
 
+          # Copy license for compliance
+          [ -f LICENSE.md ] && cp LICENSE.md "$zipdir/" || true
+
           # Copy debug pdb if present
           [ -f target/release/wezterm.pdb ] && cp target/release/wezterm.pdb "$zipdir/" || true
 
