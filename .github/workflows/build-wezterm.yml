@@ -21,7 +21,7 @@ on:
       release_name:
         description: 'Release title'
         required: false
-        default: 'Custom WezTerm Windows Build'
+        default: 'Custom WezTerm Windows Portable Build'
         type: string
       prerelease:
         description: 'Mark as pre-release'
@@ -35,7 +35,8 @@ on:
         type: boolean
 
   schedule:
-    - cron: '0 0 * * 0'
+    # 每月 1 号 00:00 UTC 自动运行构建
+    - cron: '0 0 1 * *'
 
   push:
     branches:
@@ -63,7 +64,9 @@ jobs:
         id: set_version
         run: |
           INPUT_VERSION="${{ github.event.inputs.wezterm_version }}"
-          if [ -z "$INPUT_VERSION" ] || [ "$INPUT_VERSION" = "latest" ]; then
+          if [ -n "$INPUT_VERSION" ] && [ "$INPUT_VERSION" != "latest" ]; then
+            echo "wezterm_version=${INPUT_VERSION}" >> $GITHUB_OUTPUT
+          elif [ "$INPUT_VERSION" = "latest" ]; then
             LATEST_TAG=$(curl -fsSL https://api.github.com/repos/wezterm/wezterm/releases/latest | jq -r .tag_name 2>/dev/null || echo "")
             if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
               echo "wezterm_version=${LATEST_TAG}" >> $GITHUB_OUTPUT
@@ -71,7 +74,8 @@ jobs:
               echo "wezterm_version=main" >> $GITHUB_OUTPUT
             fi
           else
-            echo "wezterm_version=${INPUT_VERSION}" >> $GITHUB_OUTPUT
+            # 默认 main 分支
+            echo "wezterm_version=main" >> $GITHUB_OUTPUT
           fi
 
       - name: Set tag name
@@ -96,7 +100,7 @@ jobs:
           if [ -n "$INPUT_NAME" ]; then
             echo "release_name=${INPUT_NAME}" >> $GITHUB_OUTPUT
           else
-            echo "release_name=Custom WezTerm Windows Build" >> $GITHUB_OUTPUT
+            echo "release_name=Custom WezTerm Windows Portable Build" >> $GITHUB_OUTPUT
           fi
 
       - name: Set patches
@@ -143,26 +147,12 @@ jobs:
         with:
           path: _builder
 
-      - name: Setup Tools (Inno Setup & Strawberry Perl)
+      - name: Setup Tools (Strawberry Perl)
         shell: pwsh
         run: |
-          # Add Strawberry Perl to PATH if available
           if (Test-Path "C:\Strawberry\perl\bin") {
             Add-Content $env:GITHUB_PATH "C:\Strawberry\perl\bin"
             Write-Host "Added Strawberry Perl to PATH"
-          }
-
-          # Ensure Inno Setup is present in PATH
-          $innoDefault = "C:\Program Files (x86)\Inno Setup 6"
-          if (Test-Path "$innoDefault\iscc.exe") {
-            Add-Content $env:GITHUB_PATH $innoDefault
-            Write-Host "Inno Setup found at $innoDefault"
-          } elseif (Get-Command iscc.exe -ErrorAction SilentlyContinue) {
-            Write-Host "iscc.exe already present in PATH"
-          } else {
-            Write-Host "Installing Inno Setup via choco..."
-            choco install innosetup -y
-            Add-Content $env:GITHUB_PATH $innoDefault
           }
 
       - name: Set WezTerm Version Tag
@@ -279,16 +269,45 @@ jobs:
         shell: cmd
         run: cargo test --workspace --no-fail-fast
 
-      - name: Package WezTerm
+      - name: Package Portable Zip
         shell: bash
         run: |
-          [ -f target/release/wezterm.pdb ] || touch target/release/wezterm.pdb
-          bash ci/deploy.sh
+          zipdir="WezTerm-windows-${TAG_NAME}"
+          zipname="${zipdir}.zip"
+          echo "Packaging portable zip: $zipname"
+
+          rm -rf "$zipdir" "$zipname"
+          mkdir -p "$zipdir"
+
+          # Copy binaries
+          cp target/release/wezterm.exe \
+             target/release/wezterm-gui.exe \
+             target/release/wezterm-mux-server.exe \
+             target/release/strip-ansi-escapes.exe \
+             "$zipdir/"
+
+          # Copy debug pdb if present
+          [ -f target/release/wezterm.pdb ] && cp target/release/wezterm.pdb "$zipdir/" || true
+
+          # Copy runtime DLLs and helper binaries
+          cp assets/windows/conhost/conpty.dll \
+             assets/windows/conhost/OpenConsole.exe \
+             assets/windows/angle/libEGL.dll \
+             assets/windows/angle/libGLESv2.dll \
+             "$zipdir/"
+
+          # Copy Mesa OpenGL fallback
+          mkdir -p "$zipdir/mesa"
+          cp target/release/mesa/opengl32.dll "$zipdir/mesa/"
+
+          # Compress to zip
+          7z a -tzip "$zipname" "$zipdir"
+          echo "Portable package ready: $zipname"
 
       - name: Generate SHA256 Checksums
         shell: bash
         run: |
-          for f in WezTerm-*.zip WezTerm-*.exe; do
+          for f in WezTerm-*.zip; do
             if [ -f "$f" ]; then
               echo "Hashing $f..."
               sha256sum "$f" > "$f.sha256"
@@ -299,10 +318,9 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wezterm-windows
+          name: wezterm-windows-portable
           path: |
             WezTerm-*.zip
-            WezTerm-*.exe
             WezTerm-*.sha256
           retention-days: 7
 
@@ -315,7 +333,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: wezterm-windows
+          name: wezterm-windows-portable
           path: release-assets
 
       - name: Create GitHub Release
@@ -328,14 +346,15 @@ jobs:
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           cat << 'EOF' > release_notes.md
-          ## WezTerm Windows Build (Patched)
+          ## WezTerm Windows Portable Build (Patched)
 
-          Automated build of [WezTerm](https://github.com/wezterm/wezterm) for Windows with custom patches applied.
+          Automated build of [WezTerm](https://github.com/wezterm/wezterm) for Windows (Portable Edition) with custom patches applied.
 
           ### Build Information
           - **WezTerm Upstream Ref**: `${{ env.WEZTERM_VERSION }}`
           - **Release Tag**: `${{ env.TAG_NAME }}`
           - **Target Platform**: Windows x86_64 (`x86_64-pc-windows-msvc`)
+          - **Package Type**: Portable Standalone Zip
 
           ### Applied Patches
           EOF
@@ -369,7 +388,6 @@ jobs:
 
           ### Included Files
           - **Portable Zip** (`WezTerm-windows-*.zip`): Portable archive containing `wezterm.exe`, `wezterm-gui.exe`, `wezterm-mux-server.exe`, and required runtime DLLs (ANGLE, ConPTY, Mesa).
-          - **Setup Installer** (`WezTerm-*-setup.exe`): Windows Inno Setup installer package.
           EOF
 
           EXTRA_ARGS=()

@@ -1,6 +1,6 @@
-# WezTerm Custom Windows Build CI
+# WezTerm Custom Windows Portable Build CI
 
-参考 [`custom-caddy`](../custom-caddy) 架构实现的自动化 GitHub Actions 编译与 Release 发布工作流，用于自动编译带有自定义补丁的 Windows 平台 [WezTerm](https://github.com/wezterm/wezterm)。
+参考 [`custom-caddy`](../custom-caddy) 架构实现的自动化 GitHub Actions 编译与 Release 发布工作流，用于自动编译带有自定义补丁的 Windows 便携版 [WezTerm](https://github.com/wezterm/wezterm)。
 
 默认集成补丁：[PR #7542: fix kitty keyboard not work in mux mode](https://github.com/wezterm/wezterm/pull/7542)。
 
@@ -8,20 +8,14 @@
 
 ## 特性
 
-- **仅针对 Windows 平台**：针对 `x86_64-pc-windows-msvc` 进行编译，采用官方静态链接方案（`-C target-feature=+crt-static`）。
-- **多种补丁方式支持**：
-  - **本地补丁**：直接放置在 `patches/*.patch` 或 `patches/*.diff` 目录。
-  - **动态链接**：支持在 GitHub Actions 页面直接输入 GitHub PR 链接（如 `https://github.com/wezterm/wezterm/pull/7542/changes`、`https://github.com/wezterm/wezterm/pull/7542`）、Commit 链接或任意 Patch URL。
-  - **安全防冲突机制**：自动检测补丁是否已合并或已应用，支持智能 3-way merge，避免重复打补丁中断流程。
-- **构建产物完整**：
-  - 便携版压缩包：`WezTerm-windows-<tag>.zip`（包含 `wezterm.exe`、`wezterm-gui.exe`、`wezterm-mux-server.exe` 及 ANGLE、ConPTY、Mesa 等运行时）。
-  - 安装程序：`WezTerm-<tag>-setup.exe`（通过 Inno Setup 6 自动生成）。
-  - 自动生成每个文件的 `SHA256` 校验和。
-- **自动 Release 发布**：编译成功后自动创建 GitHub Release，上传安装包、绿色包及校验码，并格式化输出补丁列表和版本详情。
-- **多触发模式**：
-  - `workflow_dispatch` 手动触发，支持自定义版本、补丁和 Tag。
-  - `schedule` 每周定时自动触发构建。
-  - `push` 提交到 `main` 分支触发。
+- **仅输出便携版（Portable Zip）**：纯绿色包解压即用，剔除安装程序依赖（无需 Inno Setup），体积轻量且构建更快。
+- **默认构建 upstream `main` 分支**：保证获取最新上游特性与修复。
+- **自动每月运行**：通过 Cron（每月 1 号 `0 0 1 * *`）自动定时触发编译与发布。
+- **多渠道补丁支持**：
+  - **动态链接**：直接输入 GitHub PR 链接（如 `https://github.com/wezterm/wezterm/pull/7542/changes`）、Commit 链接或任意 Patch URL，自动抓取并规范化。
+  - **本地文件**：支持提交本地补丁至 `patches/*.patch` 目录自动加载。
+  - **防冲突机制**：内置 `git apply --reverse --check` 智能跳过已包含补丁，并支持 3-way merge 回退。
+- **自动化 Release**：每次编译自动创建 GitHub Release，附带构建信息、SHA256 校验码及补丁变更清单。
 
 ---
 
@@ -31,36 +25,38 @@
 .
 ├── .github/
 │   └── workflows/
-│       └── build-wezterm.yml   # 编译与发布工作流
+│       └── build-wezterm.yml                  # 自动编译与 Release 工作流
 ├── patches/
-│   └── pr-7542-fix-kitty-keyboard-mux.patch # PR 7542 补丁
+│   └── pr-7542-fix-kitty-keyboard-mux.patch   # PR #7542 本地补丁
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## 使用方法
+## 使用与触发
 
-### 1. 手动触发构建 (workflow_dispatch)
+### 1. 自动触发
+- **每月定时**：每月 1 号 00:00 (UTC) 自动抓取 `main` 最新代码并编译发布。
+- **代码提交**：向 `main` 分支提交工作流修改或 `patches/` 变更时自动构建。
 
-进入 GitHub 仓库页面 -> **Actions** -> 选择 **Build WezTerm Windows (Patched)** -> 点击 **Run workflow**：
+### 2. 手动触发 (workflow_dispatch)
+
+前往 GitHub 仓库 -> **Actions** -> **Build WezTerm Windows (Patched)** -> **Run workflow**：
 
 | 参数 | 说明 | 默认值 |
 | :--- | :--- | :--- |
-| `wezterm_version` | 要编译的 upstream 分支、Tag 或 commit（填 `latest` 自动获取官方最新 release） | `main` |
-| `patches` | 需要打上的补丁列表（每行一个 URL，支持 PR 链接、commit 链接或 `.patch`） | `https://github.com/wezterm/wezterm/pull/7542/changes` |
-| `tag_name` | 自定义 Release Tag 名称（留空自动使用 `<wezterm_version>-YYYYMMDD-HHMMSS`） | *(留空自动生成)* |
-| `release_name` | Release 标题 | `Custom WezTerm Windows Build` |
+| `wezterm_version` | 要编译的分支/Tag（支持 `main`、Tag 或 commit hash） | `main` |
+| `patches` | 补丁列表（每行一个 URL，支持 PR 链接、commit 链接或 `.patch`） | `https://github.com/wezterm/wezterm/pull/7542/changes` |
+| `tag_name` | 自定义 Release Tag（留空则自动生成 `main-YYYYMMDD-HHMMSS`） | *(留空自动生成)* |
+| `release_name` | Release 标题 | `Custom WezTerm Windows Portable Build` |
 | `prerelease` | 是否标记为 Pre-release | `false` |
-| `run_tests` | 打包前是否运行 cargo test（耗时较长，默认跳过） | `false` |
+| `run_tests` | 是否运行 cargo 测试 | `false` |
 
-### 2. 添加其它补丁
+---
 
-有两种便捷方式：
+## 产物说明
 
-#### 方式 A：提交本地补丁到 `patches/` 目录
-将导出的 `.patch` 或 `.diff` 文件保存至 `patches/` 目录下（如 `patches/0002-my-feature.patch`），推送至 GitHub 即可自动识别并应用。
-
-#### 方式 B：在触发构建时输入链接
-直接在 `patches` 输入框中填入 PR 页面地址（如 `https://github.com/wezterm/wezterm/pull/7542/changes`），工作流会自动解析并下载标准补丁。
+Release 仅包含绿色便携包：
+- `WezTerm-windows-<tag>.zip`：解压即用，包含 `wezterm.exe`、`wezterm-gui.exe`、`wezterm-mux-server.exe` 及必需的运行时动态库（ANGLE、ConPTY、Mesa OpenGL 回退）。
+- `WezTerm-windows-<tag>.zip.sha256`：SHA256 校验和文件。
